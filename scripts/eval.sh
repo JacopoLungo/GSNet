@@ -40,45 +40,45 @@ python3 train_net.py --config $config \
  MODEL.WEIGHTS $output/model_final.pth \
  $opts
 
-# # FloodNet
+# FloodNet
 
-# python train_net.py --config $config \
-#  --num-gpus $gpus \
-#  --dist-url "auto" \
-#  --eval-only \
-#  OUTPUT_DIR $output/eval/FloodNet \
-#  MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "datasets/floodnet.json" \
-#  DATASETS.TEST \(\"FloodNet\"\,\) \
-#  TEST.SLIDING_WINDOW "True" \
-#  MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
-#  MODEL.WEIGHTS $output/model_final.pth \
-#  $opts
+python train_net.py --config $config \
+ --num-gpus $gpus \
+ --dist-url "auto" \
+ --eval-only \
+ OUTPUT_DIR $output/eval/FloodNet \
+ MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "datasets/floodnet.json" \
+ DATASETS.TEST \(\"FloodNet\"\,\) \
+ TEST.SLIDING_WINDOW "True" \
+ MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
+ MODEL.WEIGHTS $output/model_final.pth \
+ $opts
 
-# # FLAIR
-# python train_net.py --config $config \
-#  --num-gpus $gpus \
-#  --dist-url "auto" \
-#  --eval-only \
-#  OUTPUT_DIR $output/eval/FLAIR \
-#  MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "datasets/flair.json" \
-#  DATASETS.TEST \(\"FLAIR_test\"\,\) \
-#  TEST.SLIDING_WINDOW "True" \
-#  MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
-#  MODEL.WEIGHTS $output/model_final.pth \
-#  $opts
+# FLAIR
+python train_net.py --config $config \
+ --num-gpus $gpus \
+ --dist-url "auto" \
+ --eval-only \
+ OUTPUT_DIR $output/eval/FLAIR \
+ MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "datasets/flair.json" \
+ DATASETS.TEST \(\"FLAIR_test\"\,\) \
+ TEST.SLIDING_WINDOW "True" \
+ MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
+ MODEL.WEIGHTS $output/model_final.pth \
+ $opts
 
-# # FAST
-# python train_net.py --config $config \
-#  --num-gpus $gpus \
-#  --dist-url "auto" \
-#  --eval-only \
-#  OUTPUT_DIR $output/eval/FAST \
-#  MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "datasets/fast.json" \
-#  DATASETS.TEST \(\"FAST_val\"\,\) \
-#  TEST.SLIDING_WINDOW "True" \
-#  MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
-#  MODEL.WEIGHTS $output/model_final.pth \
-#  $opts
+# FAST
+python train_net.py --config $config \
+ --num-gpus $gpus \
+ --dist-url "auto" \
+ --eval-only \
+ OUTPUT_DIR $output/eval/FAST \
+ MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "datasets/fast.json" \
+ DATASETS.TEST \(\"FAST_val\"\,\) \
+ TEST.SLIDING_WINDOW "True" \
+ MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
+ MODEL.WEIGHTS $output/model_final.pth \
+ $opts
 
 
 
