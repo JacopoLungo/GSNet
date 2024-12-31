@@ -89,7 +89,7 @@ pip install -r requirements.txt
     ```bash
     sh scripts/train.sh configs/vitb_384.yaml [NUM_GPUs] [TRAIN_RESULTS_DIR]
     ```
-- We provide [pretrained weights for our models](https://drive.google.com/file/d/1YMAZj5fMUI3uSCvUmGHzyf4LthXdji0Y/view?usp=sharing) reported in the paper. Reproduction can be made through command line scripts below.
+- We provide [pretrained weights for our model](https://drive.google.com/file/d/1YMAZj5fMUI3uSCvUmGHzyf4LthXdji0Y/view?usp=sharing) reported in the paper. Reproduction can be made through command line scripts below.
 - Command for Evaluation
     ```bash
     sh scripts/eval.sh configs/vitb_384.yaml [NUM_GPUs] [EVAL_RESULTS_DIR] \
