@@ -11,7 +11,6 @@ from torch.nn import functional as F
 from detectron2.config import configurable
 from detectron2.layers import Conv2d
 
-
 from .RIPD import RIPD
 from gs_net.third_party import clip
 from gs_net.third_party import imagenet_templates
@@ -35,8 +34,15 @@ class GSNetPredictor(nn.Module):
         prompt_depth: int,
         prompt_length: int,
         decoder_dims: list,
+        decoder_clip_guidance_dims: list,
+        decoder_clip_guidance_proj_dims:list, 
+        decoder_dino_guidance_dims:list,
+        decoder_dino_guidance_proj_dims:list, 
         decoder_guidance_dims: list,
         decoder_guidance_proj_dims: list,
+        use_clip_corr: bool,
+        use_dino_corr: bool,
+        fusion_type: str,
         num_heads: int,
         num_layers: tuple,
         hidden_dims: tuple,
@@ -63,6 +69,7 @@ class GSNetPredictor(nn.Module):
         device = "cuda" if torch.cuda.is_available() else "cpu"
   
         self.tokenizer = None
+        path_to_remote_clip = '/media/zpp2/PHDD/RemoteCLIP/models--chendelong--RemoteCLIP/snapshots/bf1d8a3ccf2ddbf7c875705e46373bfe542bce38/RemoteCLIP-ViT-B-32.pt'
         if clip_pretrained == "ViT-G" or clip_pretrained == "ViT-H":
             # for OpenCLIP models
             name, pretrain = ('ViT-H-14', 'laion2b_s32b_b79k') if clip_pretrained == 'ViT-H' else ('ViT-bigG-14', 'laion2b_s39b_b160k')
@@ -71,8 +78,26 @@ class GSNetPredictor(nn.Module):
                 pretrained=pretrain, 
                 device=device, 
                 force_image_size=336,)
-        
             self.tokenizer = open_clip.get_tokenizer(name)
+        elif clip_pretrained == "RemoteCLIP-ViT-B-32":
+            # for RemoteCLIP model using OpenCLIP formatted checkpoint
+            model_name = 'ViT-B-32'
+            model_name_clip = 'ViT-B/32'
+            clip_model, clip_preprocess = clip.load(model_name_clip, device=device, jit=False, prompt_depth=prompt_depth, prompt_length=prompt_length)
+            ckpt = torch.load(path_to_remote_clip)
+            mapped_state_dict = {}
+            for key, value in ckpt.items():
+                if 'in_proj_weight' in key:
+                    # Split the in_proj_weight into q_proj_weight, k_proj_weight, and v_proj_weight
+                    qkv = torch.chunk(value, 3, dim=0)
+                    base_key = key.replace('in_proj_weight', '')
+                    mapped_state_dict[base_key + 'q_proj_weight'] = qkv[0]
+                    mapped_state_dict[base_key + 'k_proj_weight'] = qkv[1]
+                    mapped_state_dict[base_key + 'v_proj_weight'] = qkv[2]
+                else:
+                    # Directly copy other weights
+                    mapped_state_dict[key] = value
+            message = clip_model.load_state_dict(mapped_state_dict,strict=True)
         else:
             # for OpenAI models
             clip_model, clip_preprocess = clip.load(clip_pretrained, device=device, jit=False, prompt_depth=prompt_depth, prompt_length=prompt_length)
@@ -105,6 +130,13 @@ class GSNetPredictor(nn.Module):
             decoder_dims=decoder_dims,
             decoder_guidance_dims=decoder_guidance_dims,
             decoder_guidance_proj_dims=decoder_guidance_proj_dims,
+            decoder_clip_guidance_dims=decoder_clip_guidance_dims,
+            decoder_clip_guidance_proj_dims=decoder_clip_guidance_proj_dims,
+            decoder_dino_guidance_dims=decoder_dino_guidance_dims,
+            decoder_dino_guidance_proj_dims=decoder_dino_guidance_proj_dims,
+            use_clip_corr = use_clip_corr,
+            use_dino_corr = use_dino_corr,
+            fusion_type = fusion_type,
             num_layers=num_layers,
             nheads=num_heads, 
             hidden_dim=hidden_dims,
@@ -137,7 +169,13 @@ class GSNetPredictor(nn.Module):
         ret["decoder_dims"] = cfg.MODEL.SEM_SEG_HEAD.DECODER_DIMS
         ret["decoder_guidance_dims"] = cfg.MODEL.SEM_SEG_HEAD.DECODER_GUIDANCE_DIMS
         ret["decoder_guidance_proj_dims"] = cfg.MODEL.SEM_SEG_HEAD.DECODER_GUIDANCE_PROJ_DIMS
-
+        ret["decoder_clip_guidance_dims"] = cfg.MODEL.SEM_SEG_HEAD.DECODER_CLIP_GUIDANCE_DIMS
+        ret["decoder_clip_guidance_proj_dims"] = cfg.MODEL.SEM_SEG_HEAD.DECODER_CLIP_GUIDANCE_PROJ_DIMS
+        ret["decoder_dino_guidance_dims"] = cfg.MODEL.SEM_SEG_HEAD.DECODER_DINO_GUIDANCE_DIMS
+        ret["decoder_dino_guidance_proj_dims"] = cfg.MODEL.SEM_SEG_HEAD.DECODER_DINO_GUIDANCE_PROJ_DIMS       
+        ret['use_clip_corr'] = cfg.MODEL.SEM_SEG_HEAD.USE_CLIP_CORR
+        ret['use_dino_corr'] = cfg.MODEL.SEM_SEG_HEAD.USE_DINO_CORR
+        ret['fusion_type'] = cfg.MODEL.SEM_SEG_HEAD.FUSION_TYPE
         ret["prompt_depth"] = cfg.MODEL.SEM_SEG_HEAD.PROMPT_DEPTH
         ret["prompt_length"] = cfg.MODEL.SEM_SEG_HEAD.PROMPT_LENGTH
 
@@ -152,13 +190,18 @@ class GSNetPredictor(nn.Module):
         return ret
 
     def forward(self, x,dino_feat, vis_guidance,dino_guidance, prompt=None, gt_cls=None):
-        vis = [vis_guidance[k] for k in vis_guidance.keys()][::-1]
+        if vis_guidance is not None:
+            vis = [vis_guidance[k] for k in vis_guidance.keys()][::-1]
+        else:
+            vis = None
         text = self.class_texts if self.training else self.test_class_texts
         text = [text[c] for c in gt_cls] if gt_cls is not None else text
 
         text = self.get_text_embeds(text, self.prompt_templates, self.clip_model, prompt)
-        
-        text = text.repeat(x.shape[0], 1, 1, 1)
+        if x is not None:
+            text = text.repeat(x.shape[0], 1, 1, 1)
+        else:
+            text = text.repeat(dino_feat.shape[0], 1, 1, 1)
         # text: [B,N,1,512]
         out = self.transformer(x,dino_feat, text, vis,dino_guidance)
         return out

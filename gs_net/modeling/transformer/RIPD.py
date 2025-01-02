@@ -9,19 +9,25 @@ from timm.layers import PatchEmbed, Mlp, DropPath, to_2tuple, to_ntuple, trunc_n
 from .FusionAgg import AggregatorLayer
 class FusionUP(nn.Module):
     """"Upscaling using feat from dino and clip"""
-    def __init__(self, in_channels, out_channels, guidance_channels):
+    def __init__(self, in_channels, out_channels, clip_guidance_channels, dino_guidance_channels):
         super().__init__()
 
-        self.up = nn.ConvTranspose2d(in_channels, in_channels - guidance_channels, kernel_size=2, stride=2)
-        self.conv = DoubleConv(in_channels+guidance_channels, out_channels)
+        self.up = nn.ConvTranspose2d(in_channels, in_channels - clip_guidance_channels, kernel_size=2, stride=2)
+        # if self.decoder_clip_guidance_dims[0] != 0 and self.decoder_clip_guidance_dims 
+        self.conv = DoubleConv(in_channels+dino_guidance_channels, out_channels)
 
     def forward(self, x, clip_guidance,dino_guidance):
         x = self.up(x)
         if clip_guidance is not None:
             T = x.size(0) // clip_guidance.size(0)
             clip_guidance = repeat(clip_guidance, "B C H W -> (B T) C H W", T=T)
+            # dino_guidance = repeat(dino_guidance, "B C H W -> (B T) C H W", T=T)
+            x = torch.cat([x, clip_guidance], dim=1)
+        if dino_guidance is not None: 
+            T = x.size(0) // dino_guidance.size(0)
+            # clip_guidance = repeat(clip_guidance, "B C H W -> (B T) C H W", T=T)
             dino_guidance = repeat(dino_guidance, "B C H W -> (B T) C H W", T=T)
-            x = torch.cat([x, clip_guidance,dino_guidance], dim=1)
+            x = torch.cat([x,dino_guidance], dim=1)
         return self.conv(x)
 class DoubleConv(nn.Module):
     """(convolution => [GN] => ReLU) * 2"""
@@ -33,11 +39,9 @@ class DoubleConv(nn.Module):
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.GroupNorm(mid_channels // 16, mid_channels),
-            # nn.GELU(),
             nn.ReLU(inplace=True),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.GroupNorm(mid_channels // 16, mid_channels),
-            # nn.GELU()
             nn.ReLU(inplace=True)
         )
 
@@ -52,6 +56,14 @@ class RIPD(nn.Module):
         decoder_dims = (64, 32),
         decoder_guidance_dims=(256, 128),
         decoder_guidance_proj_dims=(32, 16),
+        decoder_clip_guidance_dims=(256, 128),
+        decoder_clip_guidance_proj_dims=(32, 16),
+        decoder_dino_guidance_dims=(256, 128),
+        decoder_dino_guidance_proj_dims=(32, 16),
+        feat_dim = 512,
+        use_clip_corr = True,
+        use_dino_corr = True,
+        fusion_type = "query_guided",
         num_layers=4,
         nheads=4, 
         hidden_dim=128,
@@ -62,35 +74,11 @@ class RIPD(nn.Module):
         prompt_channel=1,
         pad_len=256,
     ) -> None:
-        """
-        Cost Aggregation Model for CAT-Seg
-        Args:
-            text_guidance_dim: Dimension of text guidance
-            text_guidance_proj_dim: Dimension of projected text guidance
-            appearance_guidance_dim: Dimension of appearance guidance
-            appearance_guidance_proj_dim: Dimension of projected appearance guidance
-            decoder_dims: Upsampling decoder dimensions
-            decoder_guidance_dims: Upsampling decoder guidance dimensions
-            decoder_guidance_proj_dims: Upsampling decoder guidance projected dimensions
-            num_layers: Number of layers for the aggregator
-            nheads: Number of attention heads
-            hidden_dim: Hidden dimension for transformer blocks
-            pooling_size: Pooling size for the class aggregation layer
-                          To reduce computation, we apply pooling in class aggregation blocks to reduce the number of tokens during training
-            feature_resolution: Feature resolution for spatial aggregation
-            window_size: Window size for Swin block in spatial aggregation
-            attention_type: Attention type for the class aggregation. 
-            prompt_channel: Number of prompts for ensembling text features. Default: 1
-            pad_len: Padding length for the class aggregation. Default: 256
-                     pad_len enforces the class aggregation block to have a fixed length of tokens for all inputs
-                     This means it either pads the sequence with learnable tokens in class aggregation,
-                     or truncates the classes with the initial CLIP cosine-similarity scores.
-                     Set pad_len to 0 to disable this feature.
-            """
+
         super().__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-        self.sigmoid = nn.Sigmoid()
+        self.fusion_type = fusion_type
         self.layers = nn.ModuleList([
             AggregatorLayer(
                 hidden_dim=hidden_dim, text_guidance_dim=text_guidance_proj_dim, appearance_guidance=appearance_guidance_proj_dim, 
@@ -99,9 +87,14 @@ class RIPD(nn.Module):
         ])
 
         # self.conv1 = nn.Conv2d(prompt_channel, hidden_dim, kernel_size=7, stride=1, padding=3)
-        self.conv1 = nn.Conv2d(prompt_channel, hidden_dim, kernel_size=7, stride=1, padding=3)
-        self.conv2 = nn.Conv2d(prompt_channel, hidden_dim, kernel_size=7, stride=1, padding=3)
-        self.fusion_corr = nn.Conv2d(2*hidden_dim, hidden_dim, kernel_size=7, stride=1, padding=3)
+        if fusion_type=='simple_concatenation':
+            self.simple_concatenation_corr_embed = nn.Conv2d(3*feat_dim, hidden_dim, kernel_size=7, stride=1, padding=3)
+        else:
+            self.conv1 = nn.Conv2d(prompt_channel, hidden_dim, kernel_size=7, stride=1, padding=3) 
+            self.conv2 = nn.Conv2d(prompt_channel, hidden_dim, kernel_size=7, stride=1, padding=3) if (use_clip_corr and use_dino_corr) == True and self.fusion_type != 'fusion_query' else None
+            self.fusion_corr = nn.Conv2d(2*hidden_dim, hidden_dim, kernel_size=7, stride=1, padding=3) if (use_clip_corr and use_dino_corr) == True and self.fusion_type != 'fusion_query'else None
+            self.fusion_feats = nn.Conv2d(2*feat_dim, feat_dim,kernel_size=1, stride=1, padding=0) if fusion_type=='fusion_query'else None
+        
         self.guidance_projection = nn.Sequential(
             nn.Conv2d(appearance_guidance_dim, appearance_guidance_proj_dim, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
@@ -116,21 +109,19 @@ class RIPD(nn.Module):
             nn.Sequential(
                 nn.Conv2d(d, dp, kernel_size=3, stride=1, padding=1),
                 nn.ReLU(),
-            ) for d, dp in zip(decoder_guidance_dims, decoder_guidance_proj_dims)
-        ]) if decoder_guidance_dims[0] > 0 else None
+            ) for d, dp in zip(decoder_guidance_dims, decoder_clip_guidance_proj_dims)
+        ]) if decoder_clip_guidance_dims[0] > 0 else None
         
         self.DINO_decoder_guidance_projection = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(d, dp, kernel_size=3, stride=1, padding=1),
                 nn.ReLU(),
-            ) for d, dp in zip(decoder_guidance_dims, decoder_guidance_proj_dims)
-        ]) if decoder_guidance_dims[0] > 0 else None
+            ) for d, dp in zip(decoder_guidance_dims, decoder_dino_guidance_proj_dims)
+        ]) if decoder_dino_guidance_dims[0] > 0 else None
         
-        # self.decoder1 = Up(hidden_dim, decoder_dims[0], decoder_guidance_proj_dims[0])
-        # self.decoder2 = Up(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1])
         
-        self.Fusiondecoder1=FusionUP(hidden_dim, decoder_dims[0], decoder_guidance_proj_dims[0])
-        self.Fusiondecoder2=FusionUP(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1])
+        self.Fusiondecoder1=FusionUP(hidden_dim, decoder_dims[0], decoder_clip_guidance_proj_dims[0],decoder_dino_guidance_proj_dims[0])
+        self.Fusiondecoder2=FusionUP(decoder_dims[0], decoder_dims[1], decoder_clip_guidance_proj_dims[1], decoder_dino_guidance_proj_dims[1])
         self.head = nn.Conv2d(decoder_dims[1], 1, kernel_size=3, stride=1, padding=1)
 
         self.pad_len = pad_len
@@ -144,7 +135,17 @@ class RIPD(nn.Module):
         text_feats = F.normalize(text_feats, dim=-1) # B T C
         text_feats = repeat(text_feats, "B T C -> B C T H W", H=img_feats.shape[-2], W=img_feats.shape[-1])
         return torch.cat((img_feats, text_feats), dim=1) # B 2C T H W
-
+    
+    def simple_concatenation_corr(self,clip_feats, dino_feats, text_feats):
+        clip_feats = F.normalize(clip_feats, dim=1) # B C H W
+        clip_feats = repeat(clip_feats, "B C H W -> B C T H W", T=text_feats.shape[1])
+        dino_feats = F.normalize(dino_feats, dim=1) # B C H W
+        dino_feats = repeat(dino_feats, "B C H W -> B C T H W", T=text_feats.shape[1])
+        text_feats = F.normalize(text_feats, dim=-1) # B T P C
+        text_feats = text_feats.mean(dim=-2) # average text features over different prompts
+        text_feats = repeat(text_feats, "B T C -> B C T H W", H=clip_feats.shape[-2], W=clip_feats.shape[-1])
+        cat_feats = torch.cat((clip_feats,dino_feats, text_feats), dim=1) # B 3C T H W
+        return cat_feats 
     def correlation(self, img_feats, text_feats):
         img_feats = F.normalize(img_feats, dim=1) # B C H W
         text_feats = F.normalize(text_feats, dim=-1) # B T P C
@@ -173,7 +174,7 @@ class RIPD(nn.Module):
         # this one does not import a 1*1 conv
         # instead we modify the original embedding layer to adapt to the concatenated corr volume.
         B = clip_corr.shape[0]
-        
+        self.sigmoid = nn.Sigmoid()
         clip_corr = rearrange(clip_corr, 'B P T H W -> (B T) P H W')
         dino_corr = rearrange(dino_corr, 'B P T H W -> (B T) P H W')
  
@@ -188,7 +189,7 @@ class RIPD(nn.Module):
         clip_embed_corr = rearrange(clip_embed_corr, '(B T) C H W -> B C T H W', B=B)
         dino_embed_corr = rearrange(dino_embed_corr, '(B T) C H W -> B C T H W', B=B)
         return fused_corr, clip_embed_corr, dino_embed_corr
-        
+    
         
     def corr_fusion_embed(self,clip_corr,dino_corr):
         B = clip_corr.shape[0]
@@ -240,45 +241,39 @@ class RIPD(nn.Module):
         """
 
         classes = None
-        ################START Here modified by YCY START###############
-        corr = self.correlation(img_feats, text_feats)
-        dino_corr = self.correlation(dino_feat,text_feats)
-        if self.pad_len > 0 and text_feats.size(1) > self.pad_len:
-            avg = corr.permute(0, 2, 1, 3, 4).flatten(-3).max(dim=-1)[0] 
-            avg_dino = dino_corr.permute(0, 2, 1, 3, 4).flatten(-3).max(dim=-1)[0] 
-            classes = avg.topk(self.pad_len, dim=-1, sorted=False)[1]
-            classes_dino = avg_dino.topk(self.pad_len, dim=-1, sorted=False)[1]
-            th_text = F.normalize(text_feats, dim=-1)
-            clip_th_text = torch.gather(th_text, dim=1, index=classes[..., None, None].expand(-1, -1, th_text.size(-2), th_text.size(-1)))
-            dino_th_text = torch.gather(th_text, dim=1, index=classes_dino[..., None, None].expand(-1, -1, th_text.size(-2), th_text.size(-1)))
-            orig_clases = text_feats.size(1)
-            img_feats = F.normalize(img_feats, dim=1) # B C H W
-            dino_feats = F.normalize(dino_feat, dim=1) # B C H W
-            corr = torch.einsum('bchw, btpc -> bpthw', img_feats, clip_th_text)
-            dino_corr = torch.einsum('bchw, btpc -> bpthw', dino_feats, dino_th_text)
-        #corr = self.feature_map(img_feats, text_feats)
-        #exit()
-        # fused_corr = corr+dino_corr
 
-        # exit()
+        if dino_feat is not None and img_feats is not None:
+            if self.fusion_type == 'query_guided':
+                corr = self.correlation(img_feats, text_feats)
+                dino_corr = self.correlation(dino_feat,text_feats)
+                fused_corr_embed,clip_embed_corr, dino_embed_corr  = self.corr_fusion_embed_seperate(clip_corr = corr,dino_corr=dino_corr)
+                fused_corr_embed = fused_corr_embed+clip_embed_corr
+            elif self.fusion_type == 'simple_concatenation':
+                simple_concatenation_corr = self.simple_concatenation_corr(img_feats,dino_feat,text_feats)
+                T = simple_concatenation_corr.shape[2]
+                
+                fused_corr_embed = self.simple_concatenation_corr_embed(rearrange(simple_concatenation_corr,"B C T H W -> (B T) C H W"))
+                fused_corr_embed = rearrange(fused_corr_embed, "(B T) C H W -> B C T H W", T = T)
+            elif self.fusion_type == 'fusion_query':
+                fused_feat = self.fusion_feats(torch.cat([img_feats,dino_feat],dim=1))
+                corr = self.correlation(fused_feat,text_feats)
+                corr_embed = self.corr_embed(corr)
+                fused_corr_embed = corr_embed 
+        elif dino_feat is not None and img_feats is None:
+            corr = self.correlation(dino_feat,text_feats)
+            embed_corr = self.corr_embed(corr)
+            fused_corr_embed = embed_corr
         
-        # fused_corr_embed = self.corr_embed(fused_corr)
-        # fused_corr_embed1 = self.corr_fusion_embed_minimum(clip_corr = corr,dino_corr=dino_corr)
-        fused_corr_embed,clip_embed_corr, dino_embed_corr  = self.corr_fusion_embed_seperate(clip_corr = corr,dino_corr=dino_corr)
-        # add the res here #
+        elif dino_feat is None and img_feats is not None:
+            corr = self.correlation(img_feats,text_feats)
+            embed_corr = self.corr_embed(corr)
+            fused_corr_embed = embed_corr
 
-        fused_corr_embed = fused_corr_embed+clip_embed_corr
-
-        # add the res here #
-        # print(23333333333)
-        # clip_corr_embed = self.corr_embed(corr)
-        # dino_corr_embed = self.corr_embed(dino_corr)
-        ################END Here modified by YCY END###############
-        
-        # print(clip_corr_embed)
         projected_guidance, projected_text_guidance, CLIP_projected_decoder_guidance,DINO_projected_decoder_guidance  = None, None, [None, None], [None,None]
-        if self.guidance_projection is not None:
+        if self.guidance_projection is not None and appearance_guidance is not None:
             projected_guidance = self.guidance_projection(appearance_guidance[0])
+        if self.guidance_projection is not None and appearance_guidance is None:
+            projected_guidance = self.guidance_projection(dino_feat)
         if self.CLIP_decoder_guidance_projection is not None:
             CLIP_projected_decoder_guidance = [proj(g) for proj, g in zip(self.CLIP_decoder_guidance_projection, appearance_guidance[1:])]
         if self.DINO_decoder_guidance_projection is not None:
@@ -290,19 +285,9 @@ class RIPD(nn.Module):
 
         for layer in self.layers:
             fused_corr_embed = layer(fused_corr_embed, projected_guidance, projected_text_guidance)
-            # clip_corr_embed = layer(clip_corr_embed, projected_guidance, projected_text_guidance)
-            # dino_corr_embed = layer(dino_corr_embed, projected_guidance, projected_text_guidance)
-
-
-        # fusion_corr_embed = clip_corr_embed + dino_corr_embed
-
-        # logit = self.conv_decoder(clip_corr_embed, projected_decoder_guidance)
 
         logit = self.Fusion_conv_decoer(fused_corr_embed, CLIP_projected_decoder_guidance,DINO_projected_decoder_guidance)
 
         
-        if classes is not None:
-            out = torch.full((logit.size(0), orig_clases, logit.size(2), logit.size(3)), -100., device=logit.device)
-            out.scatter_(dim=1, index=classes[..., None, None].expand(-1, -1, logit.size(-2), logit.size(-1)), src=logit)
-            logit = out
+
         return logit
