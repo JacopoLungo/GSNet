@@ -99,7 +99,7 @@ pip install -r requirements.txt
 
 
 ## Acknowledgement
-We sincerely thank the contribution made by open-source projects and datasets, such as DETECTRON, CAT-SEG, SAMRS, OEM, LoveDA, DeepGlobe. 
+We sincerely appreciate the invaluable contributions of numerous open-source projects and datasets that have supported our work, including but not limited to [DETECTRON2](https://github.com/facebookresearch/detectron2), [CAT-SEG](https://github.com/cvlab-kaist/CAT-Seg), [SAMRS](https://github.com/ViTAE-Transformer/SAMRS), [OEM](https://open-earth-map.org/), [LoveDA](https://github.com/Junjue-Wang/LoveDA), [DeepGlobe](http://deepglobe.org/), [FloodNet](https://github.com/sahilkhose/FloodNet),  [ISPRS Potsdam](https://www.isprs.org/education/benchmarks/UrbanSemLab/2d-sem-label-potsdam.aspx), [FLAIR](https://ignf.github.io/FLAIR/). 
 ## **Citing GSNet**
 
 If you find **GSNet** helpful in your research, please consider citing:
